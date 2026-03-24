@@ -9,7 +9,7 @@ import streamlit.components.v1 as components
 
 # ---------- SETUP ----------
 load_dotenv()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 st.set_page_config(page_title="AI Data Explorer", layout="wide")
 st.title("📊 AI Data Explorer with Interactive Graph + Chat")
