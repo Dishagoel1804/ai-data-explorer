@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Data Explorer</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<h2>Ask your data</h2>
+
+<input type="text" id="query" placeholder="Ask something..." size="50">
+<button onclick="sendQuery()">Ask</button>
+
+<p id="loading" style="display:none;">⏳ Loading...</p>
+
+<h3>Answer:</h3>
+<pre id="answer"></pre>
+
+<h3>Chart:</h3>
+<canvas id="chart" width="400" height="200"></canvas>
+
+<h3>SQL:</h3>
+<pre id="sql"></pre>
+
+<h3>Raw Result:</h3>
+<pre id="result"></pre>
+
+<script>
+let chartInstance = null;
+
+async function sendQuery() {
+    const query = document.getElementById("query").value;
+
+    const loading = document.getElementById("loading");
+    const answerBox = document.getElementById("answer");
+    const sqlBox = document.getElementById("sql");
+    const resultBox = document.getElementById("result");
+
+    if (!query) {
+        alert("Enter a question");
+        return;
+    }
+
+    loading.style.display = "block";
+
+    try {
+        const res = await fetch("http://127.0.0.1:5000/query", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ query: query })
+        });
+
+        const data = await res.json();
+
+        loading.style.display = "none";
+
+        answerBox.innerText = data.explanation;
+        sqlBox.innerText = data.sql;
+        resultBox.innerText = JSON.stringify(data.result, null, 2);
+
+        // 📊 Chart rendering
+        if (data.chart) {
+            const ctx = document.getElementById("chart").getContext("2d");
+
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+
+            chartInstance = new Chart(ctx, {
+                type: "bar",
+                data: {
+                    labels: data.chart.labels,
+                    datasets: [{
+                        label: "Values",
+                        data: data.chart.values
+                    }]
+                }
+            });
+        }
+
+    } catch (err) {
+        loading.style.display = "none";
+        answerBox.innerText = "Error connecting to backend";
+    }
+}
+</script>
+
+</body>
+</html>
