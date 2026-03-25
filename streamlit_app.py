@@ -1,180 +1,199 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
-import os
-from dotenv import load_dotenv
-from groq import Groq
+import sqlite3
 from pyvis.network import Network
 import streamlit.components.v1 as components
+from groq import Groq
+import re
 
-# ---------- SETUP ----------
-load_dotenv()
+# ---------------- CONFIG ----------------
+st.set_page_config(layout="wide", page_title="AI Graph Explorer")
+
+# ---------------- API ----------------
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-st.set_page_config(page_title="AI Data Explorer", layout="wide")
-st.title("📊 AI Data Explorer with Interactive Graph + Chat")
+# ---------------- DB ----------------
+def get_connection():
+    return sqlite3.connect("sales.db")
 
-# ---------- DATABASE ----------
-def run_sql(query):
-    conn = sqlite3.connect("data.db")
-    try:
-        df = pd.read_sql_query(query, conn)
-        return df
-    except Exception as e:
-        return str(e)
-    finally:
-        conn.close()
+# ---------------- SQL CLEANER ----------------
+def clean_sql(query):
+    query = query.strip()
+    query = re.sub(r"```sql|```", "", query, flags=re.IGNORECASE)
+    query = re.sub(r"^sql\s*", "", query, flags=re.IGNORECASE)
+    return query.strip()
 
-# ---------- LOAD GRAPH DATA ----------
-def load_graph_data():
-    conn = sqlite3.connect("data.db")
-    df = pd.read_sql_query(
-        "SELECT material, netAmount FROM billing_items LIMIT 30", conn
+# ---------------- LLM ----------------
+def generate_response(messages):
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=messages,
     )
-    conn.close()
-    return df
+    return response.choices[0].message.content.strip()
 
-# ---------- GRAPH ----------
-def build_graph(df):
-    net = Network(height="500px", width="100%")
+# ---------------- GUARDRAILS ----------------
+def classify_question(question):
+    prompt = f"""
+    Classify the question.
 
-    for _, row in df.iterrows():
-        product = str(row["material"])
-        amount = str(row["netAmount"])
+    If it is related to this dataset (salesOrder, material, netAmount), return: DATA
+    Otherwise return: REJECT
 
-        net.add_node(product, label=product, color="blue")
-        net.add_node(amount, label=amount, color="green")
-        net.add_edge(product, amount)
+    Question: {question}
+    """
+    return generate_response([{"role": "user", "content": prompt}]).strip()
 
-    net.save_graph("graph.html")
-
-    with open("graph.html", "r", encoding="utf-8") as f:
-        components.html(f.read(), height=550)
-
-# ---------- INTENT ----------
-def is_data_question(question):
-    keywords = ["sales", "total", "amount", "top", "count", "product", "material"]
-    return any(word in question.lower() for word in keywords)
-
-# ---------- LLM ----------
+# ---------------- SQL GENERATION ----------------
 def generate_sql(question):
     prompt = f"""
-Convert this question to SQL using table billing_items(material, netAmount).
-Question: {question}
-Only return SQL.
-"""
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}]
-    )
+    You are a strict SQL generator.
 
-    sql = response.choices[0].message.content.strip()
-    sql = sql.replace("```sql", "").replace("```", "").strip()
-    return sql
+    Table: sales_order_items
+    Columns: salesOrder, material, netAmount
 
+    Rules:
+    - Only generate SELECT queries
+    - Use only given columns
+    - No assumptions
+    - If not possible, return: INVALID
+    - Do NOT include 'sql' or markdown
 
-def explain(question, sql, result_df):
-    limited = result_df.head(5).to_string(index=False)
+    Question: {question}
+    """
+    return clean_sql(generate_response([{"role": "user", "content": prompt}]))
 
-    prompt = f"""
-Explain clearly.
+# ---------------- GRAPH ----------------
+def build_graph(selected_node=None):
+    conn = get_connection()
 
-Question: {question}
-SQL: {sql}
-Result:
-{limited}
-"""
+    try:
+        if selected_node:
+            query = f"""
+            SELECT * FROM sales_order_items
+            WHERE salesOrder = '{selected_node}'
+            OR material = '{selected_node}'
+            LIMIT 50
+            """
+        else:
+            query = "SELECT * FROM sales_order_items LIMIT 50"
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}]
-    )
+        df = pd.read_sql_query(query, conn)
 
-    return response.choices[0].message.content.strip()
+        net = Network(
+            height="650px",
+            width="100%",
+            bgcolor="#0e1117",
+            font_color="white"
+        )
 
+        net.force_atlas_2based()
 
-def normal_chat(q):
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": q}]
-    )
-    return response.choices[0].message.content.strip()
+        for _, row in df.iterrows():
+            sales = str(row["salesOrder"])
+            material = str(row["material"])
+            amount = str(row["netAmount"])
 
-# ---------- CHAT MEMORY ----------
+            net.add_node(
+                sales,
+                label=sales,
+                color="#2ca02c",
+                title=f"Sales Order: {sales}\nMaterial: {material}\nAmount: {amount}"
+            )
+
+            net.add_node(
+                material,
+                label=material,
+                color="#1f77b4",
+                title=f"Material: {material}"
+            )
+
+            net.add_node(
+                amount,
+                label=amount,
+                color="#ff7f0e",
+                title=f"Net Amount: {amount}"
+            )
+
+            net.add_edge(sales, material)
+            net.add_edge(material, amount)
+
+        net.save_graph("graph.html")
+
+        with open("graph.html", "r", encoding="utf-8") as f:
+            components.html(f.read(), height=650)
+
+    except Exception as e:
+        st.error(f"Graph Error: {e}")
+
+# ---------------- SESSION ----------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# ---------- LOAD DATA ----------
-df_graph = load_graph_data()
+# ---------------- UI ----------------
+st.title("🧠 AI Knowledge Graph Explorer")
 
-# ---------- LAYOUT ----------
 col1, col2 = st.columns([2, 1])
 
-# ---------- LEFT: GRAPH + INTERACTION ----------
+# -------- GRAPH --------
 with col1:
-    st.subheader("🔗 Interactive Graph")
+    st.subheader("🔗 Graph Explorer")
 
-    build_graph(df_graph)
+    selected_node = st.text_input("🔍 Enter SalesOrder or Material to expand")
 
-    st.markdown("### 🔍 Explore Node")
+    build_graph(selected_node)
 
-    selected_node = st.selectbox(
-        "Select a material:",
-        df_graph["material"].unique()
-    )
-
-    if st.button("Analyze Selected Node"):
-        query = f"""
-        SELECT material, SUM(netAmount) as total_sales
-        FROM billing_items
-        WHERE material = '{selected_node}'
-        GROUP BY material
-        """
-
-        result = run_sql(query)
-
-        if not isinstance(result, str):
-            st.success(f"Analysis for {selected_node}")
-            st.dataframe(result)
-
-# ---------- RIGHT: CHAT ----------
+# -------- CHAT --------
 with col2:
-    st.subheader("💬 Chat with Data")
+    st.subheader("💬 Chat Interface")
 
+    # Show chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+            st.markdown(msg["content"])
 
-    if prompt := st.chat_input("Ask anything..."):
+    # Input
+    if prompt := st.chat_input("Ask about your data..."):
 
         st.session_state.messages.append({"role": "user", "content": prompt})
+
         with st.chat_message("user"):
-            st.write(prompt)
+            st.markdown(prompt)
 
-        if is_data_question(prompt):
+        # Guardrail check
+        category = classify_question(prompt)
 
-            sql = generate_sql(prompt)
-            result = run_sql(sql)
-
-            if isinstance(result, str):
-                reply = f"❌ {result}"
-            else:
-                explanation = explain(prompt, sql, result)
-
-                reply = f"""
-SQL:
-{sql}
-
-Result:
-{result.head().to_string(index=False)}
-
-Explanation:
-{explanation}
-"""
+        if "REJECT" in category.upper():
+            response_text = "⚠️ This system is designed to answer questions related to the dataset only."
 
         else:
-            reply = normal_chat(prompt)
+            sql = generate_sql(prompt)
 
-        st.session_state.messages.append({"role": "assistant", "content": reply})
+            if "INVALID" in sql.upper():
+                response_text = "❌ Cannot answer this from available dataset."
+
+            else:
+                try:
+                    conn = get_connection()
+                    result = pd.read_sql_query(sql, conn)
+
+                    # Show table nicely
+                    st.dataframe(result.head())
+
+                    response_text = f"""
+### 🧠 SQL
+
+{sql}
+
+### 📊 Result
+
+{result.head().to_string(index=False)}
+"""
+
+                except Exception as e:
+                    response_text = f"❌ SQL Error: {e}"
+
+        # Show response
         with st.chat_message("assistant"):
-            st.write(reply)
+            st.markdown(response_text)
+
+        st.session_state.messages.append({"role": "assistant", "content": response_text})
