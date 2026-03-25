@@ -1,31 +1,47 @@
 import pandas as pd
 import sqlite3
 import os
+import json
 
-conn = sqlite3.connect("data.db")
-
-# Function to read all json files in a folder
-def load_folder(folder_path):
-    all_data = []
+def ingest_all_data(data_root="data", db_name="sales.db"):
+    conn = sqlite3.connect(db_name)
     
-    for file in os.listdir(folder_path) or file.endswith(".json"):
-        if file.endswith(".jsonl"):
+    if not os.path.exists(data_root):
+        print(f"Error: {data_root} directory not found.")
+        return
+
+    folders = [f for f in os.listdir(data_root) if os.path.isdir(os.path.join(data_root, f))]
+    
+    for folder in folders:
+        folder_path = os.path.join(data_root, folder)
+        all_dfs = []
+        
+        jsonl_files = [f for f in os.listdir(folder_path) if f.endswith(".jsonl")]
+        
+        for file in jsonl_files:
             full_path = os.path.join(folder_path, file)
-            df = pd.read_json(full_path, lines=True)
-            all_data.append(df)
-    
-    return pd.concat(all_data, ignore_index=True)
+            try:
+                df = pd.read_json(full_path, lines=True)
+                all_dfs.append(df)
+            except Exception as e:
+                print(f"Skipping {file} due to error: {e}")
+        
+        if all_dfs:
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+            combined_df.columns = [col.strip() for col in combined_df.columns]
 
-# Load all folders
-sales_items = load_folder("data/sales_order_items")
-delivery_items = load_folder("data/outbound_delivery_items")
-billing_items = load_folder("data/billing_document_items")
+            # --- THE FIX STARTS HERE ---
+            # Convert any columns that contain dictionaries or lists into strings
+            for col in combined_df.columns:
+                if combined_df[col].apply(lambda x: isinstance(x, (dict, list))).any():
+                    combined_df[col] = combined_df[col].apply(lambda x: json.dumps(x) if x is not None else None)
+            # --- THE FIX ENDS HERE ---
 
-# Save to DB
-sales_items.to_sql("sales_order_items", conn, if_exists="replace", index=False)
-delivery_items.to_sql("delivery_items", conn, if_exists="replace", index=False)
-billing_items.to_sql("billing_items", conn, if_exists="replace", index=False)
+            combined_df.to_sql(folder, conn, if_exists="replace", index=False)
+            print(f"✅ Table '{folder}': Loaded {len(combined_df)} rows.")
 
-conn.close()
+    conn.close()
+    print("\n🚀 Database 'sales.db' is ready!")
 
-print("✅ All partitioned data loaded successfully!")
+if __name__ == "__main__":
+    ingest_all_data()
