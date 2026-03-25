@@ -7,6 +7,22 @@ from pyvis.network import Network
 import streamlit.components.v1 as components
 from groq import Groq
 
+# ---------------- AUTO-BUILD DB FOR CLOUD ----------------
+DB_PATH = "sales.db"
+
+if not os.path.exists(DB_PATH):
+    st.info("Database not found. Initializing data ingestion... Please wait.")
+    from load_data import ingest_all_data
+    ingest_all_data()
+    st.success("Database initialized successfully!")
+# ---------------------------------------------------------
+
+# ---------------- DB CHECK ----------------
+if not os.path.exists(DB_PATH):
+    from load_data import ingest_all_data
+    with st.spinner("First time setup: Ingesting data..."):
+        ingest_all_data()
+
 # ---------------- 1. CONFIG & API ----------------
 st.set_page_config(layout="wide", page_title="O2C Knowledge Graph")
 
