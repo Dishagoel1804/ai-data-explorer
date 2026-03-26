@@ -2,46 +2,48 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
-import json
 from pyvis.network import Network
 import streamlit.components.v1 as components
 from groq import Groq
 
-# ---------------- AUTO-BUILD DB FOR CLOUD ----------------
-DB_PATH = "sales.db"
+# ---------------- 1. CONFIG & THEME ----------------
+st.set_page_config(layout="wide", page_title="O2C Intelligence Hub", page_icon="📊")
 
-if not os.path.exists(DB_PATH):
-    st.info("Database not found. Initializing data ingestion... Please wait.")
-    from load_data import ingest_all_data
-    ingest_all_data()
-    st.success("Database initialized successfully!")
-# ---------------------------------------------------------
+# Custom CSS for a sleek, modern UI
+st.markdown("""
+    <style>
+    .metric-card {
+        background-color: #1e2130;
+        padding: 20px;
+        border-radius: 10px;
+        border-left: 5px solid #7b2cbf;
+        margin-bottom: 20px;
+    }
+    .stChatInput {
+        border-radius: 20px;
+    }
+    </style>
+""", unsafe_allow_value=True)
 
-# ---------------- DB CHECK ----------------
-if not os.path.exists(DB_PATH):
-    from load_data import ingest_all_data
-    with st.spinner("First time setup: Ingesting data..."):
-        ingest_all_data()
-
-# ---------------- 1. CONFIG & API ----------------
-st.set_page_config(layout="wide", page_title="O2C Knowledge Graph")
-
-# Make sure you have created .streamlit/secrets.toml with your GROQ_API_KEY
+# ---------------- 2. API & DB INIT ----------------
 if "GROQ_API_KEY" in st.secrets:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 else:
     st.error("Missing GROQ_API_KEY in .streamlit/secrets.toml")
     st.stop()
 
-# ---------------- 2. DATABASE UTILS ----------------
 DB_PATH = "sales.db"
 
+# Auto-build database for Streamlit Cloud if missing
+if not os.path.exists(DB_PATH):
+    from load_data import ingest_all_data
+    with st.spinner("⚙️ Cloud Setup: Ingesting your JSONL datasets... Please wait."):
+        ingest_all_data()
+
 def get_connection():
-    # check_same_thread=False is essential for Streamlit/SQLite stability
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def get_db_schema():
-    """Reads the actual database to tell the AI exactly what tables/columns exist."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -50,12 +52,34 @@ def get_db_schema():
     schema_desc = []
     for table in tables:
         cursor.execute(f"PRAGMA table_info({table});")
-        columns = [f"{col[1]} ({col[2]})" for col in cursor.fetchall()]
-        schema_desc.append(f"Table '{table}' has columns: {', '.join(columns)}")
+        columns = [col[1] for col in cursor.fetchall()]
+        schema_desc.append(f"Table '{table}' | Columns: {', '.join(columns)}")
     conn.close()
     return "\n".join(schema_desc)
 
-# ---------------- 3. GRAPH VISUALIZATION ----------------
+# ---------------- 3. FEATURE: REAL-TIME O2C KPIs ----------------
+def render_kpis():
+    conn = get_connection()
+    try:
+        orders_df = pd.read_sql_query("SELECT COUNT(*) as cnt FROM sales_order_headers", conn)
+        billing_df = pd.read_sql_query("SELECT SUM(netAmount) as rev FROM billing_document_items", conn)
+        delivered_df = pd.read_sql_query("SELECT COUNT(DISTINCT deliveryDocument) as cnt FROM outbound_delivery_headers", conn)
+        
+        total_orders = orders_df['cnt'][0] if not orders_df.empty else 0
+        total_rev = billing_df['rev'][0] if not billing_df.empty else 0.0
+        total_deliv = delivered_df['cnt'][0] if not delivered_df.empty else 0
+
+        colA, colB, colC = st.columns(3)
+        with colA:
+            st.markdown(f'<div class="metric-card"><h4>📦 Total Orders</h4><h2>{total_orders}</h2></div>', unsafe_allow_value=True)
+        with colB:
+            st.markdown(f'<div class="metric-card"><h4>💰 Total Revenue</h4><h2>₹{total_rev:,.2f}</h2></div>', unsafe_allow_value=True)
+        with colC:
+            st.markdown(f'<div class="metric-card"><h4>🚚 Total Deliveries</h4><h2>{total_deliv}</h2></div>', unsafe_allow_value=True)
+    except:
+        st.warning("📊 Loading KPIs... (Waiting for DB schema verification)")
+
+# ---------------- 4. GRAPH VISUALIZATION ----------------
 def build_o2c_graph(search_id=None):
     conn = get_connection()
     net = Network(height="500px", width="100%", bgcolor="#0e1117", font_color="white")
@@ -63,13 +87,8 @@ def build_o2c_graph(search_id=None):
 
     try:
         if search_id:
-            # Full O2C Trace Query (Requirement 4b)
-            # We use LEFT JOINs to show partial flows (Requirement 4c)
             query = f"""
-            SELECT 
-                s.salesOrder as SO, 
-                d.deliveryDocument as DEL, 
-                b.billingDocument as BILL
+            SELECT s.salesOrder as SO, d.deliveryDocument as DEL, b.billingDocument as BILL
             FROM sales_order_items s
             LEFT JOIN outbound_delivery_items d ON s.salesOrder = d.referenceSdDocument
             LEFT JOIN billing_document_items b ON d.deliveryDocument = b.referenceSdDocument
@@ -84,7 +103,6 @@ def build_o2c_graph(search_id=None):
 
             for _, row in df.iterrows():
                 so, deli, bill = str(row['SO']), str(row['DEL']), str(row['BILL'])
-                
                 if so != "None":
                     net.add_node(so, label=f"Order {so}", color="#2ecc71", title=f"Type: Sales Order")
                 if deli != "None":
@@ -94,8 +112,7 @@ def build_o2c_graph(search_id=None):
                     net.add_node(bill, label=f"Bill {bill}", color="#f1c40f", title=f"Type: Billing")
                     if deli != "None": net.add_edge(deli, bill)
         else:
-            # Default view: Sales Orders connected to Materials
-            df = pd.read_sql_query("SELECT salesOrder, material FROM sales_order_items LIMIT 25", conn)
+            df = pd.read_sql_query("SELECT salesOrder, material FROM sales_order_items LIMIT 20", conn)
             for _, row in df.iterrows():
                 net.add_node(str(row['salesOrder']), label=f"SO: {row['salesOrder']}", color="#2ecc71")
                 net.add_node(str(row['material']), label=f"MAT: {row['material']}", color="#e74c3c")
@@ -107,23 +124,22 @@ def build_o2c_graph(search_id=None):
     except Exception as e:
         st.error(f"Graph Error: {e}")
 
-# ---------------- 4. AI & GUARDRAILS ----------------
-def get_ai_response(user_input):
+# ---------------- 5. HIDDEN SQL & ANSWER GENERATION ----------------
+def get_clean_answer(user_input):
     schema_context = get_db_schema()
     
-    # Requirement 5: Strict Guardrails logic inside the prompt
+    # Strictly instruct AI to write standard SQL and explain it conversationally
     system_prompt = f"""
-    You are a professional SAP Order-to-Cash Data Assistant.
+    You are an SAP Order-to-Cash Database Expert.
     
-    SCHEMA CONTEXT (Use these exact names):
+    SCHEMA:
     {schema_context}
     
     RULES:
-    1. Only answer questions related to the provided tables. 
-    2. For ANY other topic (general knowledge, creative writing, etc.), you MUST respond with: 
-       "This system is designed to answer questions related to the provided dataset only."
-    3. Return valid SQL inside ```sql blocks.
-    4. Provide a brief summary of the findings after the SQL.
+    1. Translate the user query into SQLite. 
+    2. Write the query inside ```sql blocks.
+    3. After the SQL, write a conversational human answer summing up the results.
+    4. For non-dataset queries, do not output SQL. Reply exactly: "This system is designed to answer questions related to the provided dataset only."
     """
     
     response = client.chat.completions.create(
@@ -133,56 +149,86 @@ def get_ai_response(user_input):
             {"role": "user", "content": user_input}
         ]
     )
-    return response.choices[0].message.content
+    ai_raw = response.choices[0].message.content
 
-# ---------------- 5. STREAMLIT UI ----------------
-st.title("🧠 AI-Powered O2C Knowledge Graph")
+    if "This system is designed" in ai_raw:
+        return ai_raw
 
-# Sidebar for Search/Expansion (Requirement 2)
-with st.sidebar:
-    st.header("🔍 Graph Explorer")
-    search_id = st.text_input("Enter ID (SO, Delivery, or Bill)", placeholder="e.g. 80001234")
-    st.info("Searching an ID will 'Expand' the nodes to show the full transaction flow.")
+    # Extract SQL and execute it behind the scenes
+    if "```sql" in ai_raw:
+        try:
+            sql_query = ai_raw.split("```sql")[1].split("```")[0].strip()
+            df = pd.read_sql_query(sql_query, get_connection())
+            
+            # Second AI pass to turn the table into a friendly sentence
+            human_prompt = f"""
+            User Question: {user_input}
+            Data Table Results: {df.head(5).to_string()}
+            
+            Based on this table, give a friendly, direct answer. 
+            Do NOT mention the SQL query, column names, or coding terms. 
+            Just state the facts. Use bullet points if listing multiple items.
+            """
+            
+            human_response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": human_prompt}]
+            )
+            return human_response.choices[0].message.content
+        except Exception as e:
+            return f"I ran into an issue querying the dataset: {e}"
+    
+    return ai_raw
+
+# ---------------- 6. UI LAYOUT ----------------
+st.title("🧠 SAP Order-to-Cash Analytics Hub")
+
+# 📊 Top Section: KPIs
+render_kpis()
 
 col_left, col_right = st.columns([1.2, 1])
 
 with col_left:
-    st.subheader("🔗 Network Visualization")
+    st.subheader("🔗 Network Node Visualization")
+    search_id = st.text_input("Trace an Order Flow (Enter Order or Delivery ID)", placeholder="Search...")
     build_o2c_graph(search_id)
 
 with col_right:
-    st.subheader("💬 Natural Language Query")
+    st.subheader("💬 Natural Language Assistant")
     
+    # 🕵️ Smart Prompts / Quick Prompts
+    st.write("✨ Quick Queries:")
+    quick_col1, quick_col2 = st.columns(2)
+    with quick_col1:
+        trigger_top = st.button("🔝 Top products by billing count")
+    with quick_col2:
+        trigger_broken = st.button("⚠️ Find undelivered sales orders")
+
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
+    # Print chat history
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    if prompt := st.chat_input("Ask about top products, broken flows, or order status..."):
+    # Normal Chat Input
+    prompt = st.chat_input("Ask about sales, deliveries, or billing data...")
+    
+    # Override prompt if quick buttons were pressed
+    if trigger_top:
+        prompt = "Which 5 products appear in the highest number of billing document items?"
+    if trigger_broken:
+        prompt = "Identify sales order items that do not have a corresponding outbound delivery document item."
+
+    if prompt:
+        # Show human message
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            try:
-                full_ai_response = get_ai_response(prompt)
-                
-                # Check if the response contains SQL
-                if "```sql" in full_ai_response:
-                    sql_query = full_ai_response.split("```sql")[1].split("```")[0].strip()
-                    df_result = pd.read_sql_query(sql_query, get_connection())
-                    
-                    st.markdown(full_ai_response)
-                    st.dataframe(df_result, use_container_width=True)
-                    st.session_state.messages.append({"role": "assistant", "content": full_ai_response})
-                else:
-                    # This handles the Guardrail rejection or general text
-                    st.markdown(full_ai_response)
-                    st.session_state.messages.append({"role": "assistant", "content": full_ai_response})
-                    
-            except Exception as e:
-                err_msg = f"I encountered an error processing that: {e}"
-                st.error(err_msg)
-                st.session_state.messages.append({"role": "assistant", "content": err_msg})
+            with st.spinner("Analyzing Database..."):
+                clean_answer = get_clean_answer(prompt)
+                st.markdown(clean_answer)
+                st.session_state.messages.append({"role": "assistant", "content": clean_answer})
