@@ -7,7 +7,6 @@ __pycache__/
 
 # Database
 *.db
-data/
 
 # Generated files
 graph.html
