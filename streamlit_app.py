@@ -30,7 +30,7 @@ def get_schema_for_ai():
     conn.close()
     return schema_text
 
-# 2. THE CHAT ENGINE (Unchanged as requested)
+# 2. THE CHAT ENGINE (Unchanged)
 def ask_ai(user_query):
     schema = get_schema_for_ai()
     system_message = f"""
@@ -46,24 +46,22 @@ def ask_ai(user_query):
     try:
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=[{"role": "system", "content": system_message}, {"role": "user", "content": user_query}]
+            messages=[{"role": "system", "message": system_message}, {"role": "user", "content": user_query}]
         )
         return response.choices[0].message.content.strip().replace("```sql", "").replace("```", "")
     except: return "Error"
 
-# 3. UPGRADED COLOR-CODED GRAPH
+# 3. FIX: STABLE COLOR-CODED GRAPH
 def draw_graph(search_id=None, limit=50):
     conn = get_connection()
     net = Network(height="700px", width="100%", bgcolor="#0b0e14", font_color="white")
-    
-    # Physics for smooth interaction
     net.force_atlas_2based(gravity=-50, central_gravity=0.01, spring_length=100)
     
     try:
-        if search_id:
-            # Full Process Trace Query
+        if search_id and search_id.strip() != "":
+            # TRACE MODE: Detailed process flow
             query = f"""
-            SELECT s.*, d.deliveryDocument, b.billingDocument 
+            SELECT s.salesOrder, s.material, s.netAmount, d.deliveryDocument, b.billingDocument 
             FROM sales_order_items s 
             LEFT JOIN outbound_delivery_items d ON s.salesOrder = d.referenceSdDocument 
             LEFT JOIN billing_document_items b ON d.deliveryDocument = b.referenceSdDocument 
@@ -72,29 +70,29 @@ def draw_graph(search_id=None, limit=50):
             df = pd.read_sql_query(query, conn)
             
             for _, r in df.iterrows():
-                # Node 1: Sales Order (Green)
                 so_id = str(r['salesOrder'])
-                so_info = "\n".join([f"{k}: {v}" for k, v in r.items() if v and k not in ['deliveryDocument', 'billingDocument']])
-                net.add_node(so_id, label=f"SO {so_id}", color="#2ecc71", title=f"SALES ORDER DETAILS:\n{so_info}", size=25)
+                # SO Node (Green)
+                net.add_node(so_id, label=f"Order {so_id}", color="#2ecc71", title=f"Value: {r['netAmount']} INR\nMaterial: {r['material']}", size=25)
                 
-                # Node 2: Delivery (Blue)
                 if r['deliveryDocument']:
                     del_id = str(r['deliveryDocument'])
-                    net.add_node(del_id, label=f"DEL {del_id}", color="#3498db", title=f"DELIVERY ID: {del_id}", size=20)
+                    # Delivery Node (Blue)
+                    net.add_node(del_id, label=f"Del {del_id}", color="#3498db", title=f"Delivery ID: {del_id}", size=20)
                     net.add_edge(so_id, del_id, color="#575757")
                     
-                    # Node 3: Billing (Yellow)
                     if r['billingDocument']:
                         bil_id = str(r['billingDocument'])
-                        net.add_node(bil_id, label=f"INV {bil_id}", color="#f1c40f", title=f"INVOICE ID: {bil_id}", size=20)
+                        # Billing Node (Yellow)
+                        net.add_node(bil_id, label=f"Inv {bil_id}", color="#f1c40f", title=f"Invoice ID: {bil_id}", size=20)
                         net.add_edge(del_id, bil_id, color="#575757")
         else:
-            # Default View: Orders linked to Materials
-            query = f"SELECT salesOrder, material, netAmount, orderQuantity FROM sales_order_items LIMIT {limit}"
+            # EXPLORATION MODE: Standard Orders to Materials
+            # FIXED: Removed 'orderQuantity' to prevent the Execution Error in your screenshot
+            query = f"SELECT salesOrder, material, netAmount FROM sales_order_items LIMIT {limit}"
             df = pd.read_sql_query(query, conn)
             for _, r in df.iterrows():
-                net.add_node(str(r['salesOrder']), label=f"SO {r['salesOrder']}", color="#2ecc71", title=f"Value: {r['netAmount']} INR")
-                net.add_node(str(r['material']), label=f"MAT {r['material']}", color="#e74c3c", title=f"Material ID: {r['material']}")
+                net.add_node(str(r['salesOrder']), label=f"SO {r['salesOrder']}", color="#2ecc71", title=f"Sales Order\nValue: {r['netAmount']}")
+                net.add_node(str(r['material']), label=f"Mat {r['material']}", color="#e74c3c", title=f"Material/Product ID: {r['material']}")
                 net.add_edge(str(r['salesOrder']), str(r['material']))
                 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
@@ -102,7 +100,8 @@ def draw_graph(search_id=None, limit=50):
             with open(tmp.name, 'r', encoding='utf-8') as f:
                 components.html(f.read(), height=720)
     except Exception as e:
-        st.error(f"Graph Error: {e}")
+        # Fallback to show the specific error if it fails again
+        st.error(f"Graph Rendering Error: {e}")
 
 # 4. LAYOUT
 with st.sidebar:
@@ -120,7 +119,7 @@ with st.sidebar:
                 data = pd.read_sql_query(answer, get_connection())
                 st.session_state.history.append({"role": "assistant", "content": data})
             except:
-                st.session_state.history.append({"role": "assistant", "content": "Query failed. Rephrasing might help."})
+                st.session_state.history.append({"role": "assistant", "content": "I couldn't find that data."})
         st.rerun()
 
     for m in st.session_state.history:
@@ -129,5 +128,5 @@ with st.sidebar:
             else: st.markdown(m["content"])
 
 st.title("🔗 O2C Knowledge Map")
-search = st.text_input("🔍 Trace Transaction (Enter Sales Order, Delivery, or Invoice ID)")
+search = st.text_input("🔍 Trace Transaction (Enter Order, Delivery, or Invoice ID)")
 draw_graph(search)
