@@ -121,7 +121,7 @@ with st.sidebar:
     st.title("💬 Assistant")
     if "history" not in st.session_state: st.session_state.history = []
     
-    user_input = st.chat_input("Ask about broken flows or top products...")
+    user_input = st.chat_input("Ask a question...")
     if user_input:
         st.session_state.history.append({"role": "user", "content": user_input})
         answer = ask_ai(user_input)
