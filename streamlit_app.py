@@ -67,14 +67,15 @@ def ask_ai(user_query):
         return f"Error: {e}"
 
 # 3. INTERACTIVE GRAPH (With Colors & Tooltips)
-def draw_graph(search_id=None, limit=50):
+def draw_graph(search_id=None):
     conn = get_connection()
-    net = Network(height="650px", width="100%", bgcolor="#0b0e14", font_color="white")
-    net.force_atlas_2based()
+    net = Network(height="700px", width="100%", bgcolor="#0b0e14", font_color="white")
+    net.force_atlas_2based(gravity=-50, central_gravity=0.01, spring_length=100)
     
     try:
         if search_id and search_id.strip() != "":
-            # TRACE MODE: The "Lifecycle" flow
+            # TRACE MODE: The "Broken Flow" visualization
+            # We only use columns confirmed in your SQLite DB
             query = f"""
             SELECT s.salesOrder, s.material, s.netAmount, d.deliveryDocument, b.billingDocument 
             FROM sales_order_items s 
@@ -84,37 +85,42 @@ def draw_graph(search_id=None, limit=50):
             """
             df = pd.read_sql_query(query, conn)
             
+            if df.empty:
+                st.warning(f"No documents found for ID: {search_id}")
+                return
+
             for _, r in df.iterrows():
                 so = str(r['salesOrder'])
-                # Order Node (Green)
-                net.add_node(so, label=f"Order {so}", color="#2ecc71", title=f"Value: {r['netAmount']}", size=25)
+                # 🟢 GREEN: Sales Order
+                net.add_node(so, label=f"Order {so}", color="#2ecc71", title=f"Value: {r['netAmount']} INR", size=25)
                 
                 if r['deliveryDocument']:
                     de = str(r['deliveryDocument'])
-                    # Delivery Node (Blue)
+                    # 🔵 BLUE: Delivery
                     net.add_node(de, label=f"Del {de}", color="#3498db", title=f"Delivery ID: {de}", size=20)
                     net.add_edge(so, de, color="#575757")
                     
                     if r['billingDocument']:
                         bi = str(r['billingDocument'])
-                        # Invoice Node (Yellow)
+                        # 🟡 YELLOW: Invoice
                         net.add_node(bi, label=f"Inv {bi}", color="#f1c40f", title=f"Invoice ID: {bi}", size=20)
                         net.add_edge(de, bi, color="#575757")
         else:
-            # EXPLORATION MODE: Standard view
-            query = "SELECT salesOrder, material FROM sales_order_items LIMIT 40"
+            # EXPLORATION MODE (Default View)
+            # 🔴 RED: Materials
+            query = "SELECT salesOrder, material FROM sales_order_items LIMIT 30"
             df = pd.read_sql_query(query, conn)
             for _, r in df.iterrows():
-                net.add_node(str(r['salesOrder']), label=f"SO {r['salesOrder']}", color="#2ecc71", title="Sales Order")
-                net.add_node(str(r['material']), label=f"Mat {r['material']}", color="#e74c3c", title="Material/Product")
+                net.add_node(str(r['salesOrder']), label=f"SO {r['salesOrder']}", color="#2ecc71")
+                net.add_node(str(r['material']), label=f"Mat {r['material']}", color="#e74c3c")
                 net.add_edge(str(r['salesOrder']), str(r['material']))
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
             net.save_graph(tmp.name)
             with open(tmp.name, 'r', encoding='utf-8') as f:
-                components.html(f.read(), height=660)
-    except:
-        st.info("No matching data found for this ID.")
+                components.html(f.read(), height=720)
+    except Exception as e:
+        st.error(f"Graph Error: {e}")
 
 # 4. MAIN LAYOUT
 with st.sidebar:
