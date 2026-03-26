@@ -2,24 +2,50 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+import tempfile
 from pyvis.network import Network
 import streamlit.components.v1 as components
 from groq import Groq
 
-# ---------------- 1. CONFIG ----------------
-st.set_page_config(layout="wide", page_title="O2C Intelligence Graph")
-st.markdown("<style>.stApp { background-color: #0b0e14; } .stChatInput { bottom: 20px; }</style>", unsafe_allow_html=True)
+# ---------------- 1. INITIAL CONFIG & THEMING ----------------
+st.set_page_config(layout="wide", page_title="O2C Intelligence Graph", page_icon="🧠")
 
+# Dark Mode UI Styling
+st.markdown("""
+    <style>
+    .stApp { background-color: #0b0e14; }
+    iframe { border: none !important; border-radius: 10px; }
+    .stChatInput { bottom: 20px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# API Initialization
 if "GROQ_API_KEY" in st.secrets:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 else:
-    st.error("Missing GROQ_API_KEY in Secrets.")
+    st.error("Missing GROQ_API_KEY. Please add it to Streamlit Secrets.")
     st.stop()
 
 DB_PATH = "sales.db"
 
+# ---------------- 2. DATABASE & SCHEMA HELPERS ----------------
 def get_connection():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+def build_db_if_missing():
+    """Ensure the 19 folders are ingested before the app starts."""
+    if not os.path.exists(DB_PATH):
+        if os.path.exists("data"):
+            from load_data import ingest_all_data
+            with st.spinner("🚀 Analyzing 19 data folders... Building Knowledge Graph..."):
+                ingest_all_data()
+            st.success("Database Ready!")
+            st.rerun()
+        else:
+            st.error("Critical Error: 'data' folder not found. Please push your dataset to GitHub.")
+            st.stop()
+
+build_db_if_missing()
 
 def get_full_schema_context():
     conn = get_connection()
@@ -30,23 +56,24 @@ def get_full_schema_context():
     for table in tables:
         cursor.execute(f"PRAGMA table_info({table});")
         cols = [f"{c[1]}" for c in cursor.fetchall()]
-        schema_info.append(f"Table {table} has columns: {', '.join(cols)}")
+        schema_info.append(f"Table {table}: {', '.join(cols)}")
     conn.close()
     return "\n".join(schema_info)
 
-# ---------------- 2. INTERACTIVE GRAPH WITH TOOLTIPS ----------------
-def build_main_graph(search_id=None, sample_size=50):
+# ---------------- 3. INTERACTIVE GRAPH WITH TOOLTIPS ----------------
+def render_interactive_graph(search_id=None, sample_size=50):
     conn = get_connection()
+    # Initialize network with high-interactivity settings
     net = Network(height="700px", width="100%", bgcolor="#0b0e14", font_color="white", notebook=False)
     
-    # Advanced Physics for the "Dodge AI" feel
+    # Professional Physics Engine (Force Atlas 2)
     net.force_atlas_2based(gravity=-50, central_gravity=0.01, spring_length=100, spring_strength=0.08)
     
     try:
         if search_id and search_id.strip() != "":
-            # TRACE MODE with Tooltips
+            # TRACE MODE: Trace a specific Sales Order, Delivery, or Invoice
             query = f"""
-            SELECT s.salesOrder, d.deliveryDocument, b.billingDocument, s.material, s.netAmount, s.requestedQuantity
+            SELECT s.salesOrder, d.deliveryDocument, b.billingDocument, s.material, s.netAmount
             FROM sales_order_items s
             LEFT JOIN outbound_delivery_items d ON s.salesOrder = d.referenceSdDocument
             LEFT JOIN billing_document_items b ON d.deliveryDocument = b.referenceSdDocument
@@ -56,20 +83,20 @@ def build_main_graph(search_id=None, sample_size=50):
             for _, row in df.iterrows():
                 so, deli, bill = str(row['salesOrder']), str(row['deliveryDocument']), str(row['billingDocument'])
                 
-                # Adding Tooltips via the 'title' attribute
+                # Nodes with Rich Tooltips (Hover effect)
                 if so != "None":
                     net.add_node(so, label=f"Order {so}", color="#2ecc71", size=25, 
                                  title=f"Order: {so}\nMaterial: {row['material']}\nValue: {row['netAmount']} INR")
                 if deli != "None": 
                     net.add_node(deli, label=f"Delivery {deli}", color="#3498db", size=20,
-                                 title=f"Delivery: {deli}\nQty: {row['requestedQuantity']}")
+                                 title=f"Delivery: {deli}\nLinked to SO: {so}")
                     if so != "None": net.add_edge(so, deli, color="#575757")
                 if bill != "None":
                     net.add_node(bill, label=f"Invoice {bill}", color="#f1c40f", size=20,
-                                 title=f"Billing: {bill}\nStatus: Cleared")
+                                 title=f"Billing: {bill}\nRevenue Recognized")
                     if deli != "None": net.add_edge(deli, bill, color="#575757")
         else:
-            # EXPLORATION MODE with Product Names
+            # EXPLORATION MODE: Global view of Sales Orders linked to Product Names
             query = f"""
             SELECT s.salesOrder, s.material, p.productName 
             FROM sales_order_items s 
@@ -78,44 +105,49 @@ def build_main_graph(search_id=None, sample_size=50):
             """
             df = pd.read_sql_query(query, conn)
             for _, row in df.iterrows():
-                p_name = row['productName'] if row['productName'] else "Unknown Product"
-                net.add_node(str(row['salesOrder']), label=f"SO {row['salesOrder']}", color="#2ecc71", title=f"Sales Order {row['salesOrder']}")
-                net.add_node(str(row['material']), label=f"Prod {row['material']}", color="#e74c3c", title=f"Name: {p_name}")
+                p_name = row['productName'] if row['productName'] else "N/A"
+                net.add_node(str(row['salesOrder']), label=f"SO {row['salesOrder']}", color="#2ecc71", 
+                             title=f"Sales Order ID: {row['salesOrder']}")
+                net.add_node(str(row['material']), label=f"Prod {row['material']}", color="#e74c3c", 
+                             title=f"Material: {p_name}\nID: {row['material']}")
                 net.add_edge(str(row['salesOrder']), str(row['material']))
 
-        net.save_graph("large_graph.html")
-        with open("large_graph.html", "r", encoding="utf-8") as f:
-            components.html(f.read(), height=720)
-    except Exception: pass
+        # Save to temporary path to bypass Streamlit Cloud permission issues
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
+            net.save_graph(tmp.name)
+            with open(tmp.name, "r", encoding="utf-8") as f:
+                components.html(f.read(), height=720)
+    except Exception as e:
+        st.error(f"Visualization Error: {e}")
 
-# ---------------- 3. INTELLIGENT AI CORE (Requirement 5) ----------------
-def get_ai_response(user_input):
-    schema = get_full_schema_context()
+# ---------------- 4. AI ENGINE & GUARDRAILS ----------------
+def get_ai_sql_response(user_input):
+    schema_context = get_full_schema_context()
+    
     system_prompt = f"""
     You are an expert SAP O2C Data Analyst.
-    SCHEMA: {schema}
+    SCHEMA: {schema_context}
     
-    1. GUARDRAIL: If query is NOT about the dataset (jokes, general info, coding help), respond: "This system is designed to answer questions related to the provided dataset only."
-    2. MAPPING: 
-       - 'sales' or 'revenue' -> sum(netAmount)
-       - 'top product' -> group by material and join with product_descriptions to get productName.
-       - 'unbilled' -> LEFT JOIN outbound_delivery_items with billing_document_items where billingDocument is NULL.
-    3. Return ONLY a valid SQLite query. No formatting, no conversation.
+    RULES:
+    1. GUARDRAIL: If query is unrelated to SAP/O2C dataset, respond EXACTLY: "This system is designed to answer questions related to the provided dataset only."
+    2. MAPPING: Use 'netAmount' for sales/revenue. Join 'product_descriptions' for product names.
+    3. OUTPUT: Return ONLY a raw SQLite query. No markdown code blocks.
     """
+    
     try:
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
         )
         return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"ERROR: {str(e)}"
+    except Exception:
+        return "ERROR: Could not connect to AI."
 
-# ---------------- 4. UI LAYOUT ----------------
+# ---------------- 5. MAIN UI LAYOUT ----------------
 with st.sidebar:
     st.title("💬 Data Assistant")
-    sample_val = st.slider("Graph Density (Nodes)", 10, 200, 50)
-    search_input = st.text_input("🔍 Trace Specific ID", placeholder="e.g. 80001234")
+    density = st.slider("Graph Density", 10, 200, 50)
+    trace_id = st.text_input("🔍 Trace Specific ID", placeholder="e.g. 80001234")
     
     st.write("---")
     if "messages" not in st.session_state:
@@ -130,17 +162,18 @@ with st.sidebar:
 
     if prompt := st.chat_input("Ask a question..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
-        ai_sql = get_ai_response(prompt)
+        ai_output = get_ai_sql_response(prompt)
         
-        if "designed to answer questions" in ai_sql:
-            st.session_state.messages.append({"role": "assistant", "content": ai_sql})
+        if "designed to answer questions" in ai_output:
+            st.session_state.messages.append({"role": "assistant", "content": ai_output})
         else:
             try:
-                res_df = pd.read_sql_query(ai_sql, get_connection())
+                res_df = pd.read_sql_query(ai_output, get_connection())
                 st.session_state.messages.append({"role": "assistant", "content": res_df})
             except:
-                st.session_state.messages.append({"role": "assistant", "content": "I couldn't process that. Try: 'Top 5 materials by netAmount'."})
+                st.session_state.messages.append({"role": "assistant", "content": "I couldn't process that. Try: 'Top products by netAmount'."})
         st.rerun()
 
+# Center Area
 st.subheader("🔗 Order-to-Cash Knowledge Map")
-build_main_graph(search_input, sample_val)
+render_interactive_graph(trace_id, density)
