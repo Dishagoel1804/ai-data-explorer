@@ -2,29 +2,36 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+import json
 from pyvis.network import Network
 import streamlit.components.v1 as components
 from groq import Groq
 
-# ---------------- 1. CONFIG & THEME ----------------
-st.set_page_config(layout="wide", page_title="O2C Intelligence Hub", page_icon="📊")
+# ---------------- 1. CONFIG & SETUP ----------------
+st.set_page_config(layout="wide", page_title="SAP O2C Intelligence Hub", page_icon="📊")
 
-# Custom CSS for a sleek, modern UI
-st.markdown("""
-    <style>
-    .metric-card {
-        background-color: #1e2130;
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #7b2cbf;
-        margin-bottom: 20px;
-    }
-    .stChatInput {
-        border-radius: 20px;
-    }
-    </style>
-""", unsafe_allow_value=True)
+# Simplified CSS for Python 3.14 compatibility
+st.markdown("<style>.stMetric { background-color: #161b22; padding: 15px; border-radius: 10px; border: 1px solid #30363d; }</style>", unsafe_allow_html=True)
 
+# API INIT
+if "GROQ_API_KEY" in st.secrets:
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+else:
+    st.error("Please add GROQ_API_KEY to Streamlit Secrets.")
+    st.stop()
+
+DB_PATH = "sales.db"
+
+# ---------------- AUTO-BUILD DB FOR CLOUD ----------------
+if not os.path.exists(DB_PATH):
+    # Check if data folder exists before trying to ingest
+    if os.path.exists("data"):
+        from load_data import ingest_all_data
+        with st.spinner("📦 Initializing Global Knowledge Graph..."):
+            ingest_all_data()
+    else:
+        st.error("Data folder not found on server. Please push the 'data' folder to GitHub.")
+        st.stop()
 # ---------------- 2. API & DB INIT ----------------
 if "GROQ_API_KEY" in st.secrets:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
