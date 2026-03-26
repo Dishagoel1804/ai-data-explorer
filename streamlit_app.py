@@ -7,124 +7,120 @@ from pyvis.network import Network
 import streamlit.components.v1 as components
 from groq import Groq
 
-# ---------------- 1. CONFIG ----------------
-st.set_page_config(layout="wide", page_title="O2C Intelligence Graph")
-st.markdown("<style>.stApp { background-color: #0b0e14; } iframe { border: none; }</style>", unsafe_allow_html=True)
+# 1. SETUP
+st.set_page_config(layout="wide", page_title="O2C Intelligence")
+st.markdown("<style>.stApp { background-color: #0b0e14; }</style>", unsafe_allow_html=True)
 
-if "GROQ_API_KEY" in st.secrets:
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-else:
-    st.error("Missing GROQ_API_KEY")
-    st.stop()
-
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 DB_PATH = "sales.db"
 
 def get_connection():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-def get_full_schema_context():
+def get_schema_for_ai():
+    """Reads the actual database structure so the AI doesn't have to guess."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
     tables = [t[0] for t in cursor.fetchall()]
-    schema_info = []
+    schema_text = ""
     for table in tables:
         cursor.execute(f"PRAGMA table_info({table});")
         cols = [f"{c[1]}" for c in cursor.fetchall()]
-        schema_info.append(f"Table {table}: {', '.join(cols)}")
+        schema_text += f"Table {table} has columns: {', '.join(cols)}\n"
     conn.close()
-    return "\n".join(schema_info)
+    return schema_text
 
-# ---------------- 2. THE GRAPH (Now with correct columns) ----------------
-def render_interactive_graph(search_id=None, sample_size=50):
+# 2. THE CHAT ENGINE (The "ChatGPT-like" Intelligence)
+def ask_ai(user_query):
+    schema = get_schema_for_ai()
+    
+    # This prompt forces the AI to understand the O2C relationships automatically
+    system_message = f"""
+    You are an expert SAP Data Scientist. 
+    DATASET SCHEMA:
+    {schema}
+
+    O2C RELATIONSHIPS:
+    - sales_order_items.salesOrder links to outbound_delivery_items.referenceSdDocument
+    - outbound_delivery_items.deliveryDocument links to billing_document_items.referenceSdDocument
+
+    YOUR GOAL:
+    Translate the user's natural language into a valid SQLite query.
+    - 'Broken flow' or 'stuck' means a record exists in a 'parent' table but not the 'child' table.
+    - 'Top products' means grouping by 'productDescription' and summing 'netAmount'.
+    
+    GUARDRAIL (Requirement 5):
+    If the user asks about ANYTHING other than this dataset (e.g. coffee, jokes, history), 
+    respond EXACTLY: "This system is designed to answer questions related to the provided dataset only."
+
+    Output ONLY the raw SQL. No explanation.
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "system", "content": system_message}, {"role": "user", "content": user_query}]
+        )
+        sql = response.choices[0].message.content.strip().replace("```sql", "").replace("```", "")
+        return sql
+    except Exception as e:
+        return f"Error: {e}"
+
+# 3. INTERACTIVE GRAPH
+def draw_graph(search_id=None, limit=50):
     conn = get_connection()
-    net = Network(height="700px", width="100%", bgcolor="#0b0e14", font_color="white", notebook=False)
-    net.force_atlas_2based(gravity=-50, central_gravity=0.01, spring_length=100, spring_strength=0.08)
+    net = Network(height="600px", width="100%", bgcolor="#0b0e14", font_color="white")
+    net.force_atlas_2based()
     
     try:
-        if search_id and search_id.strip() != "":
-            # TRACE MODE
-            query = f"""
-            SELECT s.salesOrder, d.deliveryDocument, b.billingDocument, s.material
-            FROM sales_order_items s
-            LEFT JOIN outbound_delivery_items d ON s.salesOrder = d.referenceSdDocument
-            LEFT JOIN billing_document_items b ON d.deliveryDocument = b.referenceSdDocument
-            WHERE s.salesOrder='{search_id}' OR d.deliveryDocument='{search_id}' OR b.billingDocument='{search_id}'
-            """
-            df = pd.read_sql_query(query, conn)
-            for _, row in df.iterrows():
-                so, deli, bill = str(row['salesOrder']), str(row['deliveryDocument']), str(row['billingDocument'])
-                if so != "None": net.add_node(so, label=f"Order {so}", color="#2ecc71", title=f"SO: {so}")
-                if deli != "None": 
-                    net.add_node(deli, label=f"Deliv {deli}", color="#3498db", title=f"Delivery: {deli}")
-                    if so != "None": net.add_edge(so, deli, color="#575757")
-                if bill != "None":
-                    net.add_node(bill, label=f"Inv {bill}", color="#f1c40f", title=f"Invoice: {bill}")
-                    if deli != "None": net.add_edge(deli, bill, color="#575757")
+        if search_id:
+            query = f"SELECT s.salesOrder, d.deliveryDocument, b.billingDocument FROM sales_order_items s LEFT JOIN outbound_delivery_items d ON s.salesOrder = d.referenceSdDocument LEFT JOIN billing_document_items b ON d.deliveryDocument = b.referenceSdDocument WHERE s.salesOrder='{search_id}' OR d.deliveryDocument='{search_id}'"
         else:
-            # EXPLORATION MODE - Fixed Join Column Names
-            query = f"""
-            SELECT s.salesOrder, s.material, p.productDescription 
-            FROM sales_order_items s 
-            LEFT JOIN product_descriptions p ON s.material = p.product 
-            LIMIT {sample_size}
-            """
-            df = pd.read_sql_query(query, conn)
-            for _, row in df.iterrows():
-                desc = row['productDescription'] if row['productDescription'] else "No Description"
-                net.add_node(str(row['salesOrder']), label=f"SO {row['salesOrder']}", color="#2ecc71")
-                net.add_node(str(row['material']), label=f"Mat {row['material']}", color="#e74c3c", title=f"Name: {desc}")
-                net.add_edge(str(row['salesOrder']), str(row['material']))
-
+            query = f"SELECT salesOrder, material FROM sales_order_items LIMIT {limit}"
+        
+        df = pd.read_sql_query(query, conn)
+        for _, r in df.iterrows():
+            # Add nodes dynamically based on query results
+            for col in df.columns:
+                if str(r[col]) != "None":
+                    net.add_node(str(r[col]), label=str(r[col]), title=f"Type: {col}")
+            # Simple edges for visualization
+            if len(df.columns) > 1:
+                net.add_edge(str(r[df.columns[0]]), str(r[df.columns[1]]))
+                
         with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
             net.save_graph(tmp.name)
-            with open(tmp.name, "r", encoding="utf-8") as f:
-                components.html(f.read(), height=720)
-    except Exception as e:
-        st.error(f"Visualization Error: {e}")
+            with open(tmp.name, 'r') as f:
+                components.html(f.read(), height=650)
+    except:
+        st.info("Search for an ID to see its lifecycle graph.")
 
-# ---------------- 3. AI ENGINE (Requirement 5 Guardrails) ----------------
-def get_ai_sql_response(user_input):
-    schema_context = get_full_schema_context()
-    system_prompt = f"""
-    You are a strictly SAP O2C Data Assistant.
-    SCHEMA: {schema_context}
-    
-    1. GUARDRAIL: If query is NOT about the dataset (jokes, poems, general knowledge), respond: "This system is designed to answer questions related to the provided dataset only."
-    2. MAPPING: Use 'productDescription' from 'product_descriptions' for names. Use 'netAmount' for revenue.
-    3. Return ONLY raw SQL. No markdown.
-    """
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
-    )
-    return response.choices[0].message.content.strip()
-
-# ---------------- 4. UI ----------------
+# 4. MAIN LAYOUT
 with st.sidebar:
-    st.title("💬 Data Assistant")
-    density = st.slider("Graph Density", 10, 200, 50)
-    trace_id = st.text_input("🔍 Trace Specific ID", placeholder="e.g. 80001234")
+    st.title("💬 Assistant")
+    if "history" not in st.session_state: st.session_state.history = []
     
-    if "messages" not in st.session_state: st.session_state.messages = []
-    for m in st.session_state.messages:
-        with st.chat_message(m["role"]):
-            if isinstance(m["content"], pd.DataFrame): st.dataframe(m["content"], use_container_width=True)
-            else: st.markdown(m["content"])
-
-    if prompt := st.chat_input("Ask a question..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        ai_output = get_ai_sql_response(prompt)
+    user_input = st.chat_input("Ask about broken flows or top products...")
+    if user_input:
+        st.session_state.history.append({"role": "user", "content": user_input})
+        answer = ask_ai(user_input)
         
-        if "designed to answer questions" in ai_output:
-            st.session_state.messages.append({"role": "assistant", "content": ai_output})
+        if "designed to answer" in answer:
+            st.session_state.history.append({"role": "assistant", "content": answer})
         else:
             try:
-                res_df = pd.read_sql_query(ai_output, get_connection())
-                st.session_state.messages.append({"role": "assistant", "content": res_df})
+                data = pd.read_sql_query(answer, get_connection())
+                st.session_state.history.append({"role": "assistant", "content": data})
             except:
-                st.session_state.messages.append({"role": "assistant", "content": "I couldn't find that data. Try rephrasing."})
+                st.session_state.history.append({"role": "assistant", "content": "I understood the request but the data structure didn't match. Try asking differently."})
         st.rerun()
 
-st.subheader("🔗 Order-to-Cash Knowledge Map")
-render_interactive_graph(trace_id, density)
+    for m in st.session_state.history:
+        with st.chat_message(m["role"]):
+            if isinstance(m["content"], pd.DataFrame): st.dataframe(m["content"])
+            else: st.markdown(m["content"])
+
+st.title("🔗 O2C Knowledge Map")
+search = st.text_input("🔍 Trace Transaction (ID)")
+draw_graph(search)
